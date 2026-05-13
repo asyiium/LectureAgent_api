@@ -3,8 +3,9 @@ import aiofiles
 
 import logging
 import os
+import datetime
 
-from schemas import QuestionType
+from typing import List, Dict
 
 from langchain_deepseek import ChatDeepSeek
 from langchain_gigachat import GigaChat
@@ -13,6 +14,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from langchain_community.document_loaders import TextLoader
+from langchain_community.embeddings import HuggingFaceEmbeddings
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
 
 logger = logging.getLogger(__name__)
 
@@ -33,85 +38,127 @@ class LLMService:
             model=os.getenv('GIGACHAT_MODEL'),
             verify_ssl_certs=False
         )
-
-        self.text_chain = self.create_text_chain()
-        self.audio_chain = self.create_audio_chain()
         
-        #self.rag_chain = self.create_rag_chain()
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name='intfloat/multilingual-e5-small',
+            model_kwargs={'device':'cpu'},
+            encode_kwargs={'normalize_embeddings': True}
+        )
 
-        self.embed = {}
-        self.vector_base = {}
+        self.vector_base = Chroma(
+            persist_directory=os.getenv('VECTOR_STORE_PATH', './chroma_db'),
+            embedding_function=self.embeddings,
+            collection_name='lecture_knowledge_db'
+        )
+        
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500,
+            separators=['\n\n', '\n', ' ']
+        )
+
+        self.rag_chain = self.create_rag_chain()
 
 
-    '''def create_rag_chain(self):
+    def create_rag_chain(self):
         prompt = ChatPromptTemplate.from_messages([
-            ('system', 'аааааааааа')
-            ('human', 'История диалога: {chat_history}, релевантный контекст из базы знаний: {context}, вопрос пользователя: {question}')
+            ('system', '''Ты - научный ассистент. Отвечай на пользовательские вопросы при помощи истории предыдущего диалога и необходимых частей из базы знаний.
+             Обрати внимание:
+             1. Отвечай конкретно по вопросу
+             2. Учитывай предыдущий контекст диалога'''),
+            ('human', 'История диалога: {chat_history}, релевантный контекст из базы знаний: {context}, текущий вопрос пользователя: {question}')
         ])
         chain = prompt | self.text_llm | StrOutputParser()
-        return chain'''
-    
-    def create_audio_chain(self):
-        prompt = ChatPromptTemplate.from_messages([
-            ('system', 'Ты - научный ассистент, который анализирует расшифровки аудио лекций и отвечает по ним на вопросы пользователя. Необходимо различать интонации речи и на чём акцентирует внимание говорящий.'),
-            ('human', 'Вопрос пользователя: {question} , расшифровка аудио: {transcription}')
-        ])
-        chain = prompt | self.audio_llm | StrOutputParser()
-        return chain
-
-    def create_text_chain(self):
-        prompt = ChatPromptTemplate.from_messages([
-            ('system', 'Ты - научный ассистент, который отвечает на вопросы пользователя. Необходимо отвечать по сути и четко, не забывая контекст.'),
-            ('human', 'Вопрос пользователя: {question}, контекст {context}')
-        ])
-        chain = prompt | self.text_llm | StrOutputParser()
         return chain
     
-    async def generate_answer(self, question_text: str, media_path: str, question_type: int) -> str:
-        match question_type:
-            case QuestionType.TEXT:
-                return await self.process_text(question_text, media_path)
-            
-            case QuestionType.AUDIO:
-                return await self.process_audio(question_text, media_path)
-            
-            case QuestionType.VIDEO:
-                return await self.process_video(question_text, media_path)
-            
-            case _:
-                return "Incorrect content type"
-            
-    async def process_text(self, question_text: str, media_path: str) -> str:
-        logger.info('Started processing text: {question_text}')
+    def format_history(self, history: List[Dict]):
+        new_history = []
+        for message in history:
+            role = 'Пользователь'if message['role'] == 'user'else 'Ассистент'
+            new_history.append(f"{role}: {message['content']}")
+        return '\n'.join(new_history) if new_history else ""
+    
+    async def get_context(self, question: str):
         try:
-            loader = TextLoader(media_path)
-            documents = await loader.aload()
+            documents = await self.vector_base.asimilarity_search(question, k=3)
+            context = '\n'.join(document.page_content for document in documents)
+            return context if context else ""
+        
+        except Exception as e:
+            logger.error(f"Error getting context: {e}")
 
-            context = documents[0].page_content if documents else ""
 
-            response = await self.text_chain.ainvoke({
+    async def get_answer(self, question_text: str, history: List[Dict]) -> str:
+        logger.info(f'Started processing text: {question_text}')
+        try:
+            prompt_history = self.format_history(history)
+            db_context = await self.get_context(question_text)
+
+            response = await self.rag_chain.ainvoke({
                 "question" : question_text,
-                "context" : context
+                "context" : db_context if db_context else "",
+                "chat_history" : prompt_history
             })
-            logger.info('Ended processing text: {question_text}')
+
+            logger.info(f'Got answer for: {question_text}')
             return response
         
         except Exception as e:
             logger.error(f"Error processing text: {e}")
 
-    async def process_audio(self, question_text: str, media_path: str) -> str:
-        logger.info('Started processing audio: {media_path}')
+    async def add_media(self, media_id: str, media_path: str) -> bool:
+        logger.info(f'Adding new media to LLM base: {media_id}')
         try:
-            with open(media_path, 'rb'):
-                responce = await self.audio_chain.ainvoke({
-                    'input' : [
-                        {'type' : 'text', 'text' : question_text},
-                        {'type' : 'audio_url', 'audio_url' : {'url' : f'file://{media_path}'}}
-                    ]
-                })
-                logger.info('Ended processing audio: {media_path}')
-                return responce
+            extention = os.path.splitext(media_path)[1].lower()
+            
+            metadata = {
+                'media_id': media_id, # [TBD]: api generates this
+                'source': media_path,
+                'filename': os.path.basename(media_path),
+                'type': extention[1:],
+            }
+
+            if (extention in ['.txt', '.md']): # [!] TEXT EXTENTIONS
+                loader = TextLoader(media_path)
+                documents = await loader.aload()
+                
+                for document in documents:
+                    document.metadata.update(metadata)
+
+                chunks = self.text_splitter.split_documents(documents)
+
+                await self.vector_base.aadd_documents(chunks)
+                logger.info(f" Success adding chunks from {media_id}")
+                return True
+            
+            elif (extention in ['.mp3']): # [!] AUDIO EXTENTIONS
+                # [TBD]: audio transcribtion
+                return False
+            elif (extention in ['.mp4']): # [!] VIDEO EXTENTIONS
+                # [TBD]: video analysis
+                return False
+            else:
+                logger.warning(f" Unsupported media type")
+                return False
+
+        except Exception as e:
+            logger.error(f" Error adding media: {e}")
+            return False  
+
+    async def delete_media(self, media_id: str) -> bool:
+        logger.info(f'Deleting media for id: {media_id}')
+        try:
+            collection = self.vector_base._collection
+            all_chunks = collection.get(
+                where={'media_id': media_id}
+            )
+
+            if (all_chunks['ids']):
+                collection.delete(ids=all_chunks['ids'])
+                logger.info(f'Success deleting chunks for {media_id}')
+            else:
+                logger.warning(f'No chunks found for {media_id}')
+            return True
         
         except Exception as e:
-            logger.error(f"Error processing audio: {e}")
-    
+            logger.error(f'Error deleting media: {e}')
+            return False
