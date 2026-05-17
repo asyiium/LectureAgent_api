@@ -13,7 +13,7 @@ import {
   DeleteChatResponse,
 } from "./types";
 
-const API_BASE_URL = "/api";
+const API_BASE_URL = "http://localhost:8000";
 export async function createChat(
   user_id?: string,
 ): Promise<BaseResponse<CreateChatResponse>> {
