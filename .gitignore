@@ -4,3 +4,9 @@ __pycache__/
 .env
 .env.local
 node_modules/
+
+# mincertificate
+*.cer
+
+# db data
+chroma_db/

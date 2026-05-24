@@ -6,43 +6,51 @@ import os
 import datetime
 
 from typing import List, Dict
-
+from enum import Enum
+from sentence_transformers import SentenceTransformer
 from langchain_deepseek import ChatDeepSeek
-from langchain_gigachat import GigaChat
+from langchain_gigachat import GigaChat, GigaChatEmbeddings
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from langchain_community.document_loaders import TextLoader
-from langchain_community.embeddings import HuggingFaceEmbeddings
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 
 logger = logging.getLogger(__name__)
 
+'''
+class InteractionType(str, Enum):
+    TEST = "test"
+    GENERAL = "general"
+'''
+
+
 class LLMService:
     def __init__(self):
         self.text_llm_key = os.getenv('TEXT_LLM_API_KEY', '')
         self.audio_llm_key = os.getenv('AUDIO_LLM_API_KEY', '')
 
-        self.text_llm = ChatDeepSeek(
-            api_key=self.text_llm_key,
-            model="deepseek-chat",
-            temperature=0.5
+        self.text_llm = GigaChat(
+            credentials=self.text_llm_key,
+            scope="GIGACHAT_API_PERS",
+            ca_bundle_file=os.getenv('CA_BUNDLE_PATH')
         )
+        
 
         self.audio_llm = GigaChat(
             credentials=self.audio_llm_key,
-            scope="GIGACHAT_API_PERS",
-            model=os.getenv('GIGACHAT_MODEL'),
-            verify_ssl_certs=False
+            scope="SALUTE_SPEECH_PERS",
+            ca_bundle_file=os.getenv('CA_BUNDLE_PATH')
         )
         
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name='intfloat/multilingual-e5-small',
-            model_kwargs={'device':'cpu'},
-            encode_kwargs={'normalize_embeddings': True}
+        self.embeddings = GigaChatEmbeddings(
+            credentials=self.text_llm_key,
+            scope="GIGACHAT_API_PERS",
+            model='Embeddings',
+            ca_bundle_file=os.getenv('CA_BUNDLE_PATH')
         )
 
         self.vector_base = Chroma(
@@ -57,6 +65,17 @@ class LLMService:
         )
 
         self.rag_chain = self.create_rag_chain()
+
+
+    '''
+    def routing_function(self, type: InteractionType):
+        if (type == GENERAL):
+            # вызываем get_answer вот здесь, а в api пытаемся вызвать routing_function
+        elif (type == TEST):
+            # нужен отдельный роутеринг сервис, который будет вести подсчет баллов
+        else:
+            logger.info(f"Incorrect interaction type")
+    '''
 
 
     def create_rag_chain(self):
@@ -77,6 +96,7 @@ class LLMService:
             new_history.append(f"{role}: {message['content']}")
         return '\n'.join(new_history) if new_history else ""
     
+
     async def get_context(self, question: str):
         try:
             documents = await self.vector_base.asimilarity_search(question, k=3)
@@ -84,6 +104,7 @@ class LLMService:
             return context if context else ""
         
         except Exception as e:
+            return ""
             logger.error(f"Error getting context: {e}")
 
 

@@ -11,11 +11,16 @@ class RedisClient:
     def __init__(self):
         self.client = None
         self.session_ttl = int(os.getenv('REDIS_SESSION_TTL', 3600)) # [!] поставила один час (3600 сек), но можно поменять для теста
+        
+        self.redis_host = os.getenv('REDIS_HOST', 'localhost')
+        self.redis_port = os.getenv('REDIS_PORT', 6379)
+        self.redis_password = os.getenv('REDIS_PASSWORD', None)
     
     async def connect(self):
         self.client = await redis.Redis(
-            host=os.getenv('REDIS_HOST', 'localhost'),
-            port=int(os.getenv('REDIS_PORT', 6379)),
+            host=self.redis_host,
+            port=self.redis_port,
+            password=self.redis_password,
             decode_responses=True
         )
         await self.client.ping()
