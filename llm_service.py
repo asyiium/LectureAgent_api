@@ -71,7 +71,7 @@ class LLMService:
 
 
     def create_agent_tools(self):
-        @tool
+        @tool(description="Ищем информацию в векторной базе данных")
         def get_base_context(question_text: str):
             try:
                 documents = self.vector_base.asimilarity_search(question_text, k=3)
@@ -82,7 +82,7 @@ class LLMService:
                 logger.error(f"Error getting vector base context: {e}")
                 return ""
 
-        @tool
+        @tool(description="Ищем информацию в сети интернет")
         def get_internet_context(question_text: str):
             try:
                 tavily = TavilySearch(
@@ -116,7 +116,7 @@ class LLMService:
                     '''
 
         return create_agent(
-            llm=self.text_llm,
+            model=self.text_llm,
             tools=self.tools,
             system_prompt=prompt
         )
@@ -132,7 +132,7 @@ class LLMService:
                     '''
 
         return create_agent(
-            llm=self.text_llm,
+            model=self.text_llm,
             tools=self.tools,
             system_prompt=prompt
         )

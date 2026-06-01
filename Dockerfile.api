@@ -1,8 +1,13 @@
 from python:3.11
 workdir /app
 
+# Замените строки с 4 по 8 на следующие:
 copy requirements.txt .
-run pip install --no-cache-dir -r requirements.txt
+
+run pip install --default-timeout=100 --no-cache-dir \
+    --index-url https://repo.huaweicloud.com/repository/pypi/simple \
+    --trusted-host repo.huaweicloud.com \
+    -r requirements.txt
 
 copy . .
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
