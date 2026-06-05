@@ -91,7 +91,10 @@ class RedisClient:
         messages = await self.client.lrange(f"chat:{chat_id}:history", -max_messages, -1)
         history = []
         for message in messages:
-            history.append(json.loads(message))
+            json_message = json.loads(message)
+            if json_message.get('role') == 'user' or json_message.get('role') == 'assistant':
+                history.append(json_message)
+            #logger.info(message)
         return history
     
     async def clear_history(self, chat_id: str):

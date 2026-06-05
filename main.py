@@ -1,8 +1,10 @@
 import logging
 import uuid
+import json
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from typing import List, Annotated, Dict
 
@@ -46,13 +48,14 @@ async def create_chat(request: CreateChatSchema):
         user_id = request.user_id if request.user_id else str(uuid.uuid4())
         chat_id = str(uuid.uuid4())
         
-        chat_title = await llm.generate_chat_title(request.first_message)
+        chat_title = "New chat"
+        # chat_title = await llm.generate_chat_title(request.first_message)
         
         await redis.client.sadd(f"user:{user_id}:chats", chat_id)
         await redis.create_chat(chat_id)
         await redis.set_chat_title(chat_id, chat_title)
 
-        await redis.add_message(chat_id, 'user', request.first_message)
+        # await redis.add_message(chat_id, 'user', request.first_message)
         
         logger.info(f'Created chat {chat_id} with title: {chat_title}')
         
@@ -102,28 +105,34 @@ async def ask_question(chat_id: str, question: QuestionCreateSchema):
     try:
         history = await redis.get_history(chat_id)
         logger.info(f'Got history for chat {chat_id}')
-
-        given_answer = await llm.get_answer(
-            question.question_text,
-            history
-        )
-
-        await redis.add_message(chat_id, 'user', question.question_text)
-        await redis.add_message(chat_id, 'assistant', given_answer)
         
-        if len(history) == 0:
-            chat_title = await llm.generate_chat_title(question.question_text)
-            await redis.set_chat_title(chat_id, chat_title)
-            logger.info(f'Generated title for existing chat {chat_id}: {chat_title}')
+        async def event_generator():
+            given_answer = ""
+            async for chunk in llm.get_answer(question.question_text, history):
+                given_answer += chunk
+                yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
+            
+            await redis.add_message(chat_id, 'user', question.question_text)
+            await redis.add_message(chat_id, 'assistant', given_answer)
+            
+            logger.info(f'History {history}')
+            
+            new_title = None
+            if len(history) <= 1:
+                chat_title = await llm.generate_chat_title(question.question_text)
+                await redis.set_chat_title(chat_id, chat_title)
+                new_title = chat_title
+                
+            payload = {'type': 'done'}
+            if new_title:
+                payload['title'] = new_title
+                
+            yield f"data: {json.dumps(payload)}\n\n"
+            
+            yield "data: [DONE]\n\n"
 
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-        logger.info(f'Generated answer for chat {chat_id}')
-
-        return LLMAnswerResponseSchema(
-            answer=given_answer,
-            chat_id=chat_id
-        )
-    
     except Exception as e:
         logger.error(f'Error generating answer: {e}')
         raise HTTPException(
@@ -142,6 +151,7 @@ async def chat_list(user_id: str):
             chat_list.append({
                 "chat_id": chat_id,
                 "created_at": metadata.get('created_at'),
+                "chat_title": metadata.get('chat_title'),
                 "message_count": int(metadata.get('message_count', 0))
             })
     
@@ -149,6 +159,15 @@ async def chat_list(user_id: str):
     
     return {"chat_list": chat_list}
 
+@app.get('/chat_history/{chat_id}')
+async def chat_history(chat_id: str):
+    if not await redis.check_chat(chat_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Chat with id {chat_id} not found"
+        )
+    chat_history = await redis.get_history(chat_id)
+    return {"chat_history": chat_history}
 
 
 @app.post("/add_media")

@@ -36,15 +36,15 @@ class LLMService:
         self.text_llm = GigaChat(
             credentials=self.text_llm_key,
             scope="GIGACHAT_API_PERS",
-            ca_bundle_file=os.getenv('CA_BUNDLE_PATH')
+            ca_bundle_file=os.getenv('CA_BUNDLE_PATH'),
+            streaming=True
         )
         
         self.router_llm = GigaChat(
             credentials=self.text_llm_key,
             scope="GIGACHAT_API_PERS",
             ca_bundle_file=os.getenv('CA_BUNDLE_PATH'),
-            temperature=0.1,
-            streaming=True
+            temperature=0.1
         )
 
 
@@ -75,6 +75,7 @@ class LLMService:
         @tool(description="Ищем информацию в векторной базе данных")
         def get_base_context(question_text: str):
             try:
+                return "Нет информации из базы данных"
                 documents = self.vector_base.similarity_search(question_text, k=3)
                 context = '\n'.join(document.page_content for document in documents)
                 return f"Результат из базы данных:{context}" if context else "Нет информации из базы данных"
@@ -138,6 +139,7 @@ class LLMService:
             system_prompt=prompt
         )
     
+    
     async def generate_chat_title(self, first_message: str):
         logger.info(f'Generating chat title for: {first_message[:50]}...')
         
@@ -145,13 +147,13 @@ class LLMService:
         
         Правила:
         1. Название должно быть на русском языке
-        2. Максимальная длина - 50 символов
-        3. Название должно отражать суть вопроса/темы
+        2. Рекомендуемая длина: 2-4 слова, максимальная - 50 символов
+        3. Название должно пояснять и суммаризировать суть вопроса/темы
         4. Будь конкретным, но кратким
         
         Первое сообщение пользователя: "{first_message}"
         
-        Название чата (только текст названия, без дополнительных пояснений):'''
+        Название чата (только текст названия, без дополнительных пояснений и символов):'''
         
         try:
             response = await self.router_llm.ainvoke(prompt)
@@ -174,8 +176,8 @@ class LLMService:
             last_messages = history[-3:]
             history_text = "\n".join([f"{message['role']}: {message['content'][:100]}" for message in last_messages])
 
-        prompt = ''' Твоя задача - классифицировать вопрос пользователя в одну из двух категорий: "general" или "test"
-                
+        prompt = f''' Твоя задача - классифицировать вопрос пользователя в одну из двух категорий: "general" или "test". 
+                    
                     Правила "general":
                     1. Спрашивают общую информацию
                     2. Спрашивают вопросы о нынешних трендах
@@ -186,11 +188,14 @@ class LLMService:
                     1. Просьба поставить оценку
                     2. Желание пользователя проверить свои знания
                     3. Вопросы "проверь меня", "протестируй меня" и т.п
-                
+                    
+                    Вопрос пользователя: {history_text}
                 '''
         try:
             response = await self.router_llm.ainvoke(prompt)
             result = response.content.strip().lower()
+            
+            logger.info(result)
 
             if ('test' in result):
                 logger.info(f'Got "test" answer from router LLM: {question_text}')
@@ -208,22 +213,26 @@ class LLMService:
         try:
             interaction_type = await self.router_process(question_text, history)
             chosen_agent = self.general_agent if interaction_type == InteractionType.GENERAL else self.test_agent
-            
+
             messages = []
-            for message in history[-5:]:
-                if message.get('role') == 'user':
-                    messages.append(HumanMessage(content=message['content']))
-                elif message.get('role') == 'assistant':
-                    messages.append(AIMessage(content=message['content']))
-            
+            for m in history[-5:]:
+                if m.get('content'):
+                    if m.get('role') == 'user':
+                        messages.append(HumanMessage(content=m['content']))
+                    elif m.get('role') == 'assistant':
+                        AIMessage(content=m['content'])
+            # messages = [
+            #     HumanMessage(content=m['content']) if m.get('role') == 'user'
+            #     else AIMessage(content=m['content'])
+            #     for m in history[-5:] if m.get('content')
+            # ]
             messages.append(HumanMessage(content=question_text))
-            
-            async for chunk in chosen_agent.astream({'messages': messages}):
-                if 'messages' in chunk and chunk['messages']:
-                    last_message = chunk["messages"][-1]
-                    if hasattr(last_message, 'content'):
-                        yield last_message.content
-            
+
+            async for chunk in chosen_agent.astream({"messages": messages}, stream_mode="messages"):
+                msg = chunk[0] if isinstance(chunk, tuple) else chunk
+                if isinstance(msg, AIMessage) and msg.content:
+                    yield msg.content
+                    
         except Exception as e:
             logger.error(f"Error in streaming: {e}")
             yield f'Ошибка при работе агента: {str(e)}'
