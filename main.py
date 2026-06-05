@@ -2,6 +2,8 @@ import logging
 import uuid
 
 from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+
 from typing import List, Annotated, Dict
 
 from schemas import *
@@ -28,19 +30,38 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-@app.post("/create_chat")
-async def create_chat(user_id: str = None):
-    if (not user_id):
-        user_id = str(uuid.uuid4())
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://localhost:5174"], 
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Accept"],
+)
 
+
+
+@app.post("/create_chat")
+async def create_chat(request: CreateChatSchema):
     try:
+        user_id = request.user_id if request.user_id else str(uuid.uuid4())
         chat_id = str(uuid.uuid4())
+        
+        chat_title = await llm.generate_chat_title(request.first_message)
         
         await redis.client.sadd(f"user:{user_id}:chats", chat_id)
         await redis.create_chat(chat_id)
+        await redis.set_chat_title(chat_id, chat_title)
 
-        logger.info(f'Created chat, id: {chat_id}')
-        return {'chat_id' : chat_id, 'device_id': user_id, 'message' : 'Chat created'}
+        await redis.add_message(chat_id, 'user', request.first_message)
+        
+        logger.info(f'Created chat {chat_id} with title: {chat_title}')
+        
+        return {
+            'chat_id': chat_id,
+            'user_id': user_id,
+            'chat_title': chat_title,
+            'message': 'Chat created successfully'
+        }
     
     except Exception as e:
         logger.error(f'Error creating new chat: {e}')
@@ -51,7 +72,7 @@ async def create_chat(user_id: str = None):
 
 
 @app.delete("/delete_chat/{chat_id}")
-async def delete_chat(chat_id: str):
+async def delete_chat(chat_id: str, user_id: str = None):
     if (not await redis.check_chat(chat_id)):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, 
@@ -59,7 +80,7 @@ async def delete_chat(chat_id: str):
         )
     
     try:
-        await redis.delete_chat(chat_id)
+        await redis.delete_chat(chat_id, user_id)
         logger.info(f'Deleted chat with id {chat_id}')
         return {"message" : "Chat with id {chat_id} deleted."}
     
@@ -90,6 +111,12 @@ async def ask_question(chat_id: str, question: QuestionCreateSchema):
         await redis.add_message(chat_id, 'user', question.question_text)
         await redis.add_message(chat_id, 'assistant', given_answer)
         
+        if len(history) == 0:
+            chat_title = await llm.generate_chat_title(question.question_text)
+            await redis.set_chat_title(chat_id, chat_title)
+            logger.info(f'Generated title for existing chat {chat_id}: {chat_title}')
+
+
         logger.info(f'Generated answer for chat {chat_id}')
 
         return LLMAnswerResponseSchema(

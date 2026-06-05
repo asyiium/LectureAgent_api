@@ -43,7 +43,8 @@ class LLMService:
             credentials=self.text_llm_key,
             scope="GIGACHAT_API_PERS",
             ca_bundle_file=os.getenv('CA_BUNDLE_PATH'),
-            temperature=0.1
+            temperature=0.1,
+            streaming=True
         )
 
 
@@ -74,7 +75,7 @@ class LLMService:
         @tool(description="Ищем информацию в векторной базе данных")
         def get_base_context(question_text: str):
             try:
-                documents = self.vector_base.asimilarity_search(question_text, k=3)
+                documents = self.vector_base.similarity_search(question_text, k=3)
                 context = '\n'.join(document.page_content for document in documents)
                 return f"Результат из базы данных:{context}" if context else "Нет информации из базы данных"
             
@@ -137,6 +138,36 @@ class LLMService:
             system_prompt=prompt
         )
     
+    async def generate_chat_title(self, first_message: str):
+        logger.info(f'Generating chat title for: {first_message[:50]}...')
+        
+        prompt = f'''Твоя задача - создать короткое и информативное название для чата на основе первого сообщения пользователя.
+        
+        Правила:
+        1. Название должно быть на русском языке
+        2. Максимальная длина - 50 символов
+        3. Название должно отражать суть вопроса/темы
+        4. Будь конкретным, но кратким
+        
+        Первое сообщение пользователя: "{first_message}"
+        
+        Название чата (только текст названия, без дополнительных пояснений):'''
+        
+        try:
+            response = await self.router_llm.ainvoke(prompt)
+            title = response.content.strip()
+            
+            # Ограничиваем длину
+            if len(title) > 50:
+                title = title[:47] + "..."
+            
+            logger.info(f'Generated title: {title}')
+            return title
+            
+        except Exception as e:
+            logger.error(f'Error generating chat title: {e}')
+            return f"Чат от {datetime.datetime.now().strftime('%d.%m %H:%M')}"
+
     async def router_process(self, question_text: str, history: List[Dict]) -> InteractionType:
         history_text = ""
         if (history):
@@ -171,38 +202,31 @@ class LLMService:
             logger.error(f'Error with router LLM: {e}')
             return InteractionType.GENERAL
         
-    async def get_answer(self, question_text: str, history: List[Dict]) -> str:
-        logger.info(f'Started processing text: {question_text}')
+    async def get_answer(self, question_text: str, history: List[Dict]):
+        logger.info(f'Started streaming for: {question_text}')
+        
         try:
-            interaction_type = self.router_process(question_text, history)
-            chosen_agent = self.general_agent
-
-            if (interaction_type == InteractionType.TEST):
-                chosen_agent = self.test_agent
-
+            interaction_type = await self.router_process(question_text, history)
+            chosen_agent = self.general_agent if interaction_type == InteractionType.GENERAL else self.test_agent
+            
             messages = []
             for message in history[-5:]:
                 if message.get('role') == 'user':
                     messages.append(HumanMessage(content=message['content']))
                 elif message.get('role') == 'assistant':
                     messages.append(AIMessage(content=message['content']))
-
+            
             messages.append(HumanMessage(content=question_text))
-
-            response = await chosen_agent.ainvoke({'messages' : messages})
-
-            if ('messages' in response and response['messages']):
-                last_message = response["messages"][-1]
-                answer = last_message.content if hasattr(last_message, 'content') else str(last_message)
-            else:
-                answer = "Агент не произвел ответ"
-
-            logger.info(f'Got answer for: {question_text}')
-            return answer
-        
+            
+            async for chunk in chosen_agent.astream({'messages': messages}):
+                if 'messages' in chunk and chunk['messages']:
+                    last_message = chunk["messages"][-1]
+                    if hasattr(last_message, 'content'):
+                        yield last_message.content
+            
         except Exception as e:
-            logger.error(f"Error processing text: {e}")
-            return f'Ошибка при работе агента: str({e})'
+            logger.error(f"Error in streaming: {e}")
+            yield f'Ошибка при работе агента: {str(e)}'
 
     async def add_media(self, media_id: str, media_path: str) -> bool:
         logger.info(f'Adding new media to LLM base: {media_id}')

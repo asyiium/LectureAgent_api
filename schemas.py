@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 from datetime import datetime
 
 """ MISC """
@@ -32,3 +32,7 @@ class MediaCreateSchema(BaseModel):
 class ChatHistorySchema(BaseModel):
     chat_id: str
     messages: List[MessageSchema]
+
+class CreateChatSchema(BaseModel):
+    first_message: Optional[str] = None
+    user_id: Optional[str] = None

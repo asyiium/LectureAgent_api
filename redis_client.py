@@ -54,15 +54,20 @@ class RedisClient:
 
         logger.info(f'Chat {chat_id} created')
 
-    async def check_chat(self, chat_id: str) -> bool:
+    async def check_chat(self, chat_id: str):
         metadata_key = f"chat:{chat_id}:metadata"
         return await self.client.exists(metadata_key) > 0
 
-    async def delete_chat(self, chat_id: str):
+    async def delete_chat(self, chat_id: str, user_id: str = None):
         history_key = f"chat:{chat_id}:history"
         metadata_key = f"chat:{chat_id}:metadata"
         await self.client.delete(metadata_key, history_key)
+        
+        if user_id:
+            await self.client.srem(f"user:{user_id}:chats", chat_id)
+        
         logger.info(f'Chat {chat_id} deleted')
+
 
     async def add_message(self, chat_id: str, role: str, content: str):
         history_key = f"chat:{chat_id}:history"
@@ -113,3 +118,16 @@ class RedisClient:
     async def get_metadata(self, chat_id: str):
         metadata_key = f'chat:{chat_id}:metadata'
         return await self.client.hgetall(metadata_key)
+    
+    async def set_chat_title(self, chat_id: str, chat_title: str):
+        await self.client.hset(f"chat:{chat_id}:metadata", "chat_title", chat_title)
+        logger.info(f'Set title for chat {chat_id}: {chat_title}')
+    
+    async def get_chat_title(self, chat_id: str):
+        title = await self.client.hget(f"chat:{chat_id}:metadata", "chat_title")
+        if not title:
+            return "Новый чат"
+        return title.decode('utf-8') if isinstance(title, bytes) else title
+    
+    async def update_chat_list_with_title(self, user_id: str, chat_id: str, chat_title: str):
+        await self.client.hset(f"user:{user_id}:chat:{chat_id}", "chat_title", chat_title)
