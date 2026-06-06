@@ -10,6 +10,8 @@ from enum import Enum
 from langchain_gigachat import GigaChat, GigaChatEmbeddings
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
+from langchain_core.documents import Document
 
 from langchain_community.document_loaders import TextLoader, PyPDFLoader, UnstructuredPowerPointLoader
 
@@ -18,6 +20,7 @@ from langchain_chroma import Chroma
 
 from langchain.agents import create_agent
 from langchain.tools import tool
+
 from langchain_tavily import TavilySearch
 
 from salute_speech.speech_recognition import SaluteSpeechClient 
@@ -73,11 +76,15 @@ class LLMService:
 
     def create_agent_tools(self):
         @tool(description="Ищем информацию в векторной базе данных")
-        def get_base_context(question_text: str):
+        def get_base_context(question_text: str, config: RunnableConfig):
             try:
-                chat_id = kwargs.get('chat_id')
+                chat_id = config.get("configurable", {}).get("chat_id")
+                logger.info(f"Searching chat_id={chat_id}, query={question_text[:100]}")
+                
                 documents = self.vector_base.similarity_search(question_text, k=3, filter={"chat_id" : chat_id})
+                logger.info(f"Found {len(documents)} documents for chat_id={chat_id}")
                 context = '\n'.join(document.page_content for document in documents)
+
                 return f"Результат из базы данных:{context}" if context else "Нет информации из базы данных"
             
             except Exception as e:
@@ -108,15 +115,31 @@ class LLMService:
 
     def create_general_agent(self):
         prompt = '''Ты - научный ассистент. Отвечай на пользовательские вопросы при помощи истории предыдущего диалога и необходимых частей из базы знаний.
-                    
-                    Правила ответов:
-                    1. Если пользователь загрузил файлы в этот чат (chat_id: {chat_id}), ОБЯЗАТЕЛЬНО используй инструмент get_base_context для поиска информации
-                    2. Отвечай конкретно по вопросу, но достаточно подробно
-                    3. Учитывай предыдущий контекст 
-                    4. При просьбе пользователя или при отсутствии информации в базе данных, ты можешь воспользоваться поиском в интернете
-                    5. Если не знаешь ответа, честно напиши об этом.
-                    
-                    '''
+                
+                ВАЖНЫЕ ПРАВИЛА:
+                1. Если пользователь просит "транскрибируй", "расшифруй аудио" или подобное:
+                - Вызови get_base_context с вопросом "транскрипция аудио"
+                - Верни ПОЛНОСТЬЮ текст из базы данных, который содержит расшифровку
+                - Не добавляй от себя "я не могу транскрибировать" - ты уже это сделал при загрузке!
+                
+                2. Если пользователь загрузил файлы в этот чат (chat_id: {chat_id}), ОБЯЗАТЕЛЬНО используй инструмент get_base_context для поиска информации
+                
+                3. Отвечай конкретно по вопросу, но достаточно подробно
+                
+                4. Учитывай предыдущий контекст
+                
+                5. При просьбе пользователя или при отсутствии информации в базе данных, ты можешь воспользоваться поиском в интернете
+                
+                6. Если не знаешь ответа, честно напиши об этом.
+                
+                ПРИМЕР:
+                Пользователь: "Транскрибируй"
+                Твои действия:
+                1. get_base_context("транскрипция аудио")
+                2. Если в ответе есть "Результат из базы данных:" - верни этот текст пользователю
+                3. Не говори, что не можешь транскрибировать - файл уже обработан!
+            
+            '''
 
         return create_agent(
             model=self.text_llm,
@@ -125,13 +148,26 @@ class LLMService:
         )
     
     def create_test_agent(self):
-        prompt = '''Ты - научный ассистент-эксперт. Составляй тесты для проверки знаний пользователя и оценивай ответы пользователя.
+        prompt = '''Ты - научный ассистент. Отвечай на пользовательские вопросы.
                     
-                    1. Придумывай конкретные вопросы из базы знаний
-                    2. Указывай на ошибки и говори правильные ответы в случае неудачи пользователя
-                    3. Не используй интернет ни при каком случае, только информация из базы данных
+                    АЛГОРИТМ РАБОТЫ (строго последовательно):
+                    1. Сначала ОБЯЗАТЕЛЬНО вызови get_base_context
+                    2. Проанализируй результат:
+                    - Если есть "Результат из базы данных" и есть конкретная информация - используй её
+                    - Если результат "Нет информации из базы данных" - вызови get_internet_context
+                    3. Только после этого отвечай пользователю
                     
-                    '''
+                    НЕЛЬЗЯ:
+                    - Отвечать без вызова get_base_context
+                    - Вызывать get_internet_context до get_base_context
+                    - Вызывать инструменты повторно
+                    
+                    Пример правильной последовательности:
+                    1. Вызов get_base_context("вопрос пользователя")
+                    2. Если пусто → вызов get_internet_context("вопрос пользователя")  
+                    3. Формирование ответа на основе полученной информации
+
+                '''
 
         return create_agent(
             model=self.text_llm,
@@ -158,8 +194,12 @@ class LLMService:
         
         try:
             response = await self.router_llm.ainvoke(prompt)
-            title = response.content.strip().strip('"').strip('`').strip('»').strip('«')
-            
+
+            title = response.content.strip()
+            title = title.strip('"\',.?!;:')
+            title = title.strip('»«›‹()[]{}')
+            title = ' '.join(title.split())
+
             if len(title) > 50:
                 title = title[:47] + "..."
             
@@ -203,24 +243,28 @@ class LLMService:
             logger.error(f'Error with router LLM: {e}')
             return InteractionType.GENERAL
         
-    async def get_answer(self, question_text: str, history: List[Dict]):
+    async def get_answer(self, question_text: str, history: List[Dict], chat_id: str = None):
         logger.info(f'Started streaming for: {question_text}')
         
         try:
             interaction_type = await self.router_process(question_text, history)
             chosen_agent = self.general_agent if interaction_type == InteractionType.GENERAL else self.test_agent
-
+            
             messages = []
             for m in history[-5:]:
-                if m.get('content'):
-                    if m.get('role') == 'user':
-                        messages.append(HumanMessage(content=m['content']))
-                    elif m.get('role') == 'assistant':
-                        messages.append(AIMessage(content=m['content']))
-
+                if m.get('role') == 'user':
+                    messages.append(HumanMessage(content=m['content']))
+                elif m.get('role') == 'assistant':
+                    messages.append(AIMessage(content=m['content']))
             messages.append(HumanMessage(content=question_text))
 
-            async for chunk in chosen_agent.astream({"messages": messages}, stream_mode="messages"):
+            config = {"configurable": {"chat_id": chat_id}}
+
+            async for chunk in chosen_agent.astream(
+                {"messages": messages}, 
+                config=config,
+                stream_mode="messages"
+            ):
                 msg = chunk[0] if isinstance(chunk, tuple) else chunk
                 if isinstance(msg, AIMessage) and msg.content:
                     yield msg.content
@@ -241,6 +285,10 @@ class LLMService:
                 'filename': os.path.basename(media_path),
                 'type': extention[1:],
             }
+
+            logger.info(f"Processing file with extension: {extention}")
+            logger.info(f"File path: {media_path}")
+            logger.info(f"File exists: {os.path.exists(media_path)}")
 
             if (extention in ['.txt', '.md']):
                 loader = TextLoader(media_path)
@@ -284,7 +332,7 @@ class LLMService:
                 logger.info(f" Success adding chunks from {media_id}")
                 return True
             
-            elif (extention in ['.mp3']): 
+            elif (extention in ['.ogg', '.mp3', '.flac', '.wav']): 
                 try:
                     client = SaluteSpeechClient(client_credentials=self.audio_llm_key)
                     with open(media_path, "rb") as audio_file:
@@ -293,15 +341,15 @@ class LLMService:
                             language="ru-RU"
                         )
                     if (result and result.text):
-                        documents = await loader.aload()
-                
-                        for document in documents:
-                            document.metadata.update(metadata)
-
-                        chunks = self.text_splitter.split_documents(documents)
-
+                        document = Document(
+                            page_content=result.text,
+                            metadata=metadata
+                        )
+                        
+                        chunks = self.text_splitter.split_documents([document])
                         await self.vector_base.aadd_documents(chunks)
-                        logger.info(f" Success adding chunks from {media_id}")
+                        
+                        logger.info(f"Success adding transcribed audio from {media_id}")
                         return True
                     else:
                         logger.info(f" Got no text from audio {media_id}")
