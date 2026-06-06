@@ -1,8 +1,11 @@
 import logging
 import uuid
 import json
+import os
+import datetime
+import aiofiles
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -12,6 +15,7 @@ from schemas import *
 from llm_service import LLMService
 from redis_client import RedisClient
 
+from pathlib import Path
 from sqlalchemy.orm import Session
 
 logging.basicConfig(level=logging.INFO)
@@ -170,46 +174,96 @@ async def chat_history(chat_id: str):
     return {"chat_history": chat_history}
 
 
-@app.post("/add_media")
-async def add_media(media: MediaCreateSchema) -> Dict:
-    try:
-        media_id = str(uuid.uuid4())
-
-        success = await llm.add_media(media_id, media.media_path)
-        if (not success):
-            raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail=f"Error adding media"
-        )  
-
-        return {'media_id': media_id, 'status': 'added'}
-
-    except Exception as e:
-        logger.error(f'Error adding media: {e}')
+@app.post("/add_media/{chat_id}")
+async def add_media(chat_id: str, file: UploadFile = File(...)):
+    if not await redis.check_chat(chat_id):
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail=f"Error adding media: {str(e)}"
-        ) 
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f'Chat with id {chat_id} not found'
+        )
     
-@app.post("/delete_media/{media_id}")
-async def delete_media(media_id: str):
-    try:
-        success = await llm.delete_media(media_id)
+    ext = Path(file.filename).suffix.lower()
 
-        if (not success):
+    if ext not in ['.txt', '.pdf', '.pptx', '.mp3', '.md']:
+        raise HTTPException(400, f"Unsupported file type: {ext}")
+    
+    media_id = str(uuid.uuid4())
+    temp_dir = os.getenv('TEMP_DIR', '/tmp')
+    file_path = os.path.join(temp_dir, f'{media_id}{ext}')
+
+    os.makedirs(temp_dir, exist_ok=True)
+
+    try:
+        content = await file.read()
+        async with aiofiles.open(file_path, 'wb') as f:
+            await f.write(content)
+        
+        success = await llm.add_media(media_id, file_path, chat_id)
+        
+        if not success:
+            os.remove(file_path)
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-                detail=f"Error deleting media"
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to process media file"
             )
         
-        return {'media_id': media_id, 'status': 'deleted'}
-          
+        await redis.client.sadd(f"chat:{chat_id}:media", media_id)
+        await redis.client.hset(f"media:{media_id}", mapping={
+            "chat_id": chat_id,
+            "filename": file.filename,
+            "file_size": len(content),
+            "uploaded_at": datetime.now().isoformat(),
+            "file_path": file_path
+        })
+        
+        # os.remove(file_path)
+
+        logger.info(f"Media {media_id} uploaded and linked to chat {chat_id}")
+        
+        return {
+            "media_id": media_id,
+            "filename": file.filename,
+            "message": f"File {file.filename} uploaded and processed"
+        }
+        
     except Exception as e:
-        logger.error(f'Error deleting media: {e}')
+        logger.error(f"Error uploading media: {e}")
+        if os.path.exists(file_path):
+            os.remove(file_path)
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail=f"Error deleting media: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error uploading media: {str(e)}"
         )
 
-
-# [TBD] @app.post('/edit_question/{question_id})
+@app.delete("/delete_media/{chat_id}/{media_id}")
+async def delete_media(chat_id: str, media_id: str):
+    try:
+        is_member = await redis.client.sismember(f"chat:{chat_id}:media", media_id)
+        if not is_member:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Media {media_id} not found in chat {chat_id}"
+            )
+        
+        success = await llm.delete_media(media_id)
+        
+        if success:
+            await redis.client.srem(f"chat:{chat_id}:media", media_id)
+            await redis.client.delete(f"media:{media_id}")
+            
+            logger.info(f"Media {media_id} deleted from chat {chat_id}")
+            return {"status": "deleted", "media_id": media_id}
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to delete media from vector database"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting media: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting media: {str(e)}"
+        )

@@ -75,7 +75,8 @@ class LLMService:
         @tool(description="Ищем информацию в векторной базе данных")
         def get_base_context(question_text: str):
             try:
-                documents = self.vector_base.similarity_search(question_text, k=3)
+                chat_id = kwargs.get('chat_id')
+                documents = self.vector_base.similarity_search(question_text, k=3, filter={"chat_id" : chat_id})
                 context = '\n'.join(document.page_content for document in documents)
                 return f"Результат из базы данных:{context}" if context else "Нет информации из базы данных"
             
@@ -109,10 +110,11 @@ class LLMService:
         prompt = '''Ты - научный ассистент. Отвечай на пользовательские вопросы при помощи истории предыдущего диалога и необходимых частей из базы знаний.
                     
                     Правила ответов:
-                    1. Отвечай конкретно по вопросу, но достаточно подробно
-                    2. Учитывай предыдущий контекст 
-                    3. При просьбе пользователя или при отсутствии информации в базе данных, ты можешь воспользоваться поиском в интернете
-                    4. Если не знаешь ответа, честно напиши об этом.
+                    1. Если пользователь загрузил файлы в этот чат (chat_id: {chat_id}), ОБЯЗАТЕЛЬНО используй инструмент get_base_context для поиска информации
+                    2. Отвечай конкретно по вопросу, но достаточно подробно
+                    3. Учитывай предыдущий контекст 
+                    4. При просьбе пользователя или при отсутствии информации в базе данных, ты можешь воспользоваться поиском в интернете
+                    5. Если не знаешь ответа, честно напиши об этом.
                     
                     '''
 
@@ -144,7 +146,7 @@ class LLMService:
         prompt = f'''Твоя задача - создать короткое и информативное название для чата на основе первого сообщения пользователя.
         
         Правила:
-        1. Ответ всегда должен поступать в формате: "example_title"
+        1. Не используй специальные символы в роде подчеркиваний (*, ^, & и так далее)
         2. Название должно быть на русском языке
         3. Рекомендуемая длина: 2-4 слова, максимальная - 50 символов
         4. Название должно пояснять и суммаризировать суть вопроса/темы
@@ -156,9 +158,8 @@ class LLMService:
         
         try:
             response = await self.router_llm.ainvoke(prompt)
-            title = response.content.strip().strip('"')
+            title = response.content.strip().strip('"').strip('`').strip('»').strip('«')
             
-            # Ограничиваем длину
             if len(title) > 50:
                 title = title[:47] + "..."
             
@@ -228,13 +229,14 @@ class LLMService:
             logger.error(f"Error in streaming: {e}")
             yield f'Ошибка при работе агента: {str(e)}'
 
-    async def add_media(self, media_id: str, media_path: str) -> bool:
+    async def add_media(self, media_id: str, media_path: str, chat_id: str = None) -> bool:
         logger.info(f'Adding new media to LLM base: {media_id}')
         try:
             extention = os.path.splitext(media_path)[1].lower()
             
             metadata = {
                 'media_id': media_id,
+                'chat_id' : chat_id,
                 'source': media_path,
                 'filename': os.path.basename(media_path),
                 'type': extention[1:],
