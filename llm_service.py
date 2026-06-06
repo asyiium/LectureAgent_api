@@ -75,7 +75,6 @@ class LLMService:
         @tool(description="Ищем информацию в векторной базе данных")
         def get_base_context(question_text: str):
             try:
-                return "Нет информации из базы данных"
                 documents = self.vector_base.similarity_search(question_text, k=3)
                 context = '\n'.join(document.page_content for document in documents)
                 return f"Результат из базы данных:{context}" if context else "Нет информации из базы данных"
@@ -128,8 +127,7 @@ class LLMService:
                     
                     1. Придумывай конкретные вопросы из базы знаний
                     2. Указывай на ошибки и говори правильные ответы в случае неудачи пользователя
-                    3. Оценивай каждый ответ по правильности в шкале от 1 до 5 (школьная оценка)
-                    4. Не используй интернет ни при каком случае, только информация из базы данных
+                    3. Не используй интернет ни при каком случае, только информация из базы данных
                     
                     '''
 
@@ -146,18 +144,19 @@ class LLMService:
         prompt = f'''Твоя задача - создать короткое и информативное название для чата на основе первого сообщения пользователя.
         
         Правила:
-        1. Название должно быть на русском языке
-        2. Рекомендуемая длина: 2-4 слова, максимальная - 50 символов
-        3. Название должно пояснять и суммаризировать суть вопроса/темы
-        4. Будь конкретным, но кратким
-        
+        1. Ответ всегда должен поступать в формате: "example_title"
+        2. Название должно быть на русском языке
+        3. Рекомендуемая длина: 2-4 слова, максимальная - 50 символов
+        4. Название должно пояснять и суммаризировать суть вопроса/темы
+        5. Будь конкретным, но кратким
+
         Первое сообщение пользователя: "{first_message}"
         
-        Название чата (только текст названия, без дополнительных пояснений и символов):'''
+        Название чата:'''
         
         try:
             response = await self.router_llm.ainvoke(prompt)
-            title = response.content.strip()
+            title = response.content.strip().strip('"')
             
             # Ограничиваем длину
             if len(title) > 50:
@@ -171,25 +170,21 @@ class LLMService:
             return f"Чат от {datetime.datetime.now().strftime('%d.%m %H:%M')}"
 
     async def router_process(self, question_text: str, history: List[Dict]) -> InteractionType:
-        history_text = ""
-        if (history):
-            last_messages = history[-3:]
-            history_text = "\n".join([f"{message['role']}: {message['content'][:100]}" for message in last_messages])
+        prompt = f''' Твоя задача - классифицировать вопрос пользователя в одну из двух категорий: "general" или "test". В ответе не используй кавычки или другие специальные символы (!, ", etc.)
 
-        prompt = f''' Твоя задача - классифицировать вопрос пользователя в одну из двух категорий: "general" или "test". 
-                    
                     Правила "general":
                     1. Спрашивают общую информацию
                     2. Спрашивают вопросы о нынешних трендах
                     3. Просят помощи в решение задачи
-                    4. Все, что не содежит указаний на создание теста
+                    4. Сообщение "протестируй меня" должно ссылать на "test", но "протестируй что-то/какую-то возможность" должно приводить к "general"
+                    5. Все, что не содежит указаний на создание теста
                     
                     Правила "test":
                     1. Просьба поставить оценку
                     2. Желание пользователя проверить свои знания
-                    3. Вопросы "проверь меня", "протестируй меня" и т.п
-                    
-                    Вопрос пользователя: {history_text}
+                    3. Вопросы "проверь меня", "протестируй меня", "помоги составить тест" и т.п
+
+                    Вопрос пользователя: {question_text}
                 '''
         try:
             response = await self.router_llm.ainvoke(prompt)
@@ -220,12 +215,8 @@ class LLMService:
                     if m.get('role') == 'user':
                         messages.append(HumanMessage(content=m['content']))
                     elif m.get('role') == 'assistant':
-                        AIMessage(content=m['content'])
-            # messages = [
-            #     HumanMessage(content=m['content']) if m.get('role') == 'user'
-            #     else AIMessage(content=m['content'])
-            #     for m in history[-5:] if m.get('content')
-            # ]
+                        messages.append(AIMessage(content=m['content']))
+
             messages.append(HumanMessage(content=question_text))
 
             async for chunk in chosen_agent.astream({"messages": messages}, stream_mode="messages"):
