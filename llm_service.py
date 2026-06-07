@@ -23,6 +23,7 @@ from langchain_chroma import Chroma
 
 from langchain.agents import create_agent
 from langchain.tools import tool
+from langchain.agents.middleware import ToolRetryMiddleware
 
 from langchain_tavily import TavilySearch
 
@@ -123,37 +124,43 @@ class LLMService:
 
     def create_general_agent(self):
         prompt = '''Ты - научный ассистент. Отвечай на пользовательские вопросы при помощи истории предыдущего диалога и необходимых частей из базы знаний.
-                
-                ВАЖНЫЕ ПРАВИЛА:
-                1. Если пользователь просит "транскрибируй", "расшифруй аудио" или подобное:
-                - Вызови get_base_context с вопросом "транскрипция аудио"
-                - Верни ПОЛНОСТЬЮ текст из базы данных, который содержит расшифровку
-                - Не добавляй от себя "я не могу транскрибировать" - ты уже это сделал при загрузке!
-                
-                2. Если пользователь загрузил файлы в этот чат (chat_id: {chat_id}), ОБЯЗАТЕЛЬНО используй инструмент get_base_context для поиска информации
-                
-                3. Отвечай конкретно по вопросу, но достаточно подробно
-                
-                4. Учитывай предыдущий контекст
-                
-                5. При просьбе пользователя или при отсутствии информации в базе данных, ты можешь воспользоваться поиском в интернете
-                
-                6. Если не знаешь ответа, честно напиши об этом.
-                
-                ПРИМЕР:
-                Пользователь: "Транскрибируй"
-                Твои действия:
-                1. get_base_context("транскрипция аудио")
-                2. Если в ответе есть "Результат из базы данных:" - верни этот текст пользователю
-                3. Не говори, что не можешь транскрибировать - файл уже обработан!
-            
-            '''
+    
+                    ВАЖНЫЕ ПРАВИЛА ИСПОЛЬЗОВАНИЯ ИНСТРУМЕНТОВ:
+                    1. Вызови get_base_context **ТОЛЬКО ОДИН РАЗ** в самом начале, чтобы получить контекст из базы знаний
+                    2. Если после вызова get_base_context информации недостаточно, вызови get_internet_context **ТОЛЬКО ОДИН РАЗ**
+                    3. **НЕ ВЫЗЫВАЙ ОДИН И ТОТ ЖЕ ИНСТРУМЕНТ ПОВТОРНО** - это не даст новой информации
+                    4. После получения информации из инструментов, сразу формируй ответ
+                    5. Не упоминай названия функций get_base_context или get_internet_context в ответе
 
-        return create_agent(
+                    СПЕЦИАЛЬНЫЕ КОМАНДЫ:
+                    - Если пользователь просит "транскрибируй", "расшифруй аудио": вызови get_base_context("транскрипция аудио") ОДИН РАЗ и используй результат
+                    
+                    ОТВЕТ:
+                    Отвечай конкретно по вопросу, но достаточно подробно. Учитывай предыдущий контекст.
+                    Если не знаешь ответа, честно напиши об этом.
+                    
+                    ПРИМЕР ПРАВИЛЬНОЙ РАБОТЫ:
+                    - Ты получаешь вопрос "Расскажи про зебр"
+                    - Ты вызываешь get_base_context("зебры")  [1 раз]
+                    - Получаешь результат (или "Нет информации")
+                    - Формируешь ответ на основе полученной информации
+                    - НЕ вызываешь инструменты повторно в том же ответе
+                
+                '''
+        retry_middleware = ToolRetryMiddleware(
+            max_retries=2,
+            tools=["get_base_context"],
+            on_failure="continue"
+        )
+
+        agent = create_agent(
             model=self.text_llm,
             tools=self.tools,
-            system_prompt=prompt
+            system_prompt=prompt,
+            middleware=[retry_middleware]
         )
+
+        return agent
     
     def create_test_agent(self):
         prompt = '''Ты - научный ассистент. Твоя задача - собрать информацию и сформулировать вопросы для теста. 
@@ -180,11 +187,18 @@ class LLMService:
                     Верни ТОЛЬКО список из 5 вопросов. Каждый вопрос с новой строки. 
                     БЕЗ НУМЕРАЦИИ, БЕЗ МАРКЕРОВ, БЕЗ ЦИФР В НАЧАЛЕ. Просто чистый текст вопроса.
                 '''
+        
+        retry_middleware = ToolRetryMiddleware(
+            max_retries=2,
+            tools=["get_base_context"],
+            on_failure="continue"
+        )
 
         return create_agent(
             model=self.text_llm,
             tools=self.tools,
-            system_prompt=prompt
+            system_prompt=prompt,
+            middleware=[retry_middleware]
         )
         
     
@@ -403,6 +417,7 @@ class LLMService:
                 ):
                     msg = chunk[0] if isinstance(chunk, tuple) else chunk
                     if isinstance(msg, AIMessage) and msg.content:
+                        logger.info(f"General; yielding part: {msg.content}")
                         yield msg.content
                     
         except Exception as e:
