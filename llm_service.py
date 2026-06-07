@@ -29,6 +29,8 @@ from langchain_tavily import TavilySearch
 
 from salute_speech.speech_recognition import SaluteSpeechClient 
 
+from middleware import CatchMiddleware
+
 logger = logging.getLogger(__name__)
 
 class InteractionType(str, Enum):
@@ -147,17 +149,18 @@ class LLMService:
                     - НЕ вызываешь инструменты повторно в том же ответе
                 
                 '''
-        retry_middleware = ToolRetryMiddleware(
-            max_retries=2,
-            tools=["get_base_context", "get_internet_context"],
-            on_failure="continue"
-        )
-
         agent = create_agent(
             model=self.text_llm,
             tools=self.tools,
             system_prompt=prompt,
-            middleware=[retry_middleware]
+            middleware=[
+                CatchMiddleware(
+                    max_calls_per_tool={
+                        "get_base_context": 1,
+                        "get_internet_context": 1
+                    }
+                )
+            ]
         )
 
         return agent
@@ -187,18 +190,18 @@ class LLMService:
                     Верни ТОЛЬКО список из 5 вопросов. Каждый вопрос с новой строки. 
                     БЕЗ НУМЕРАЦИИ, БЕЗ МАРКЕРОВ, БЕЗ ЦИФР В НАЧАЛЕ. Просто чистый текст вопроса.
                 '''
-        
-        retry_middleware = ToolRetryMiddleware(
-            max_retries=2,
-            tools=["get_base_context", "get_internet_context"],
-            on_failure="continue"
-        )
-
         return create_agent(
             model=self.text_llm,
             tools=self.tools,
             system_prompt=prompt,
-            middleware=[retry_middleware]
+            middleware=[
+                CatchMiddleware(
+                    max_calls_per_tool={
+                        "get_base_context": 1,
+                        "get_internet_context": 1
+                    }
+                )
+            ]
         )
         
     
