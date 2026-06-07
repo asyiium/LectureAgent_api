@@ -149,7 +149,7 @@ class LLMService:
                 '''
         retry_middleware = ToolRetryMiddleware(
             max_retries=2,
-            tools=["get_base_context"],
+            tools=["get_base_context", "get_internet_context"],
             on_failure="continue"
         )
 
@@ -190,7 +190,7 @@ class LLMService:
         
         retry_middleware = ToolRetryMiddleware(
             max_retries=2,
-            tools=["get_base_context"],
+            tools=["get_base_context", "get_internet_context"],
             on_failure="continue"
         )
 
@@ -312,6 +312,7 @@ class LLMService:
                         
             if interaction_type == InteractionType.TEST:
                 logger.info("TEST mode: step-by-step generation")
+                yield "[TEST_START]"
 
                 # ШАГ 1: Агент собирает контекст и генерирует 5 вопросов
                 agent_response = await chosen_agent.ainvoke({"messages": messages}, config=config)

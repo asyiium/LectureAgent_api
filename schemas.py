@@ -1,10 +1,10 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Literal
 from datetime import datetime
 
 """ MISC """
 class MessageSchema(BaseModel):
-    role: str
+    role: Literal["user", "assistant", "test"]
     content: str
     timestamp: datetime
 
@@ -13,6 +13,24 @@ class MessageSchema(BaseModel):
 
 class QuestionCreateSchema(BaseModel):
     question_text: str
+    
+
+""" TEST """
+
+class TestQuestionSchema(BaseModel):
+    question_text: str
+    options: List[str]
+    explanation: str
+    user_answer: Optional[int] = None
+
+class TestSchema(BaseModel):
+    test_id: str
+    test_title: str
+    questions: List[TestQuestionSchema]
+    
+class UpdateTestAnswerSchema(BaseModel):
+    question_index: int
+    user_answer: int
     
 
 """ LLM """

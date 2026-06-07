@@ -92,7 +92,7 @@ class RedisClient:
         history = []
         for message in messages:
             json_message = json.loads(message)
-            if json_message.get('role') == 'user' or json_message.get('role') == 'assistant':
+            if json_message.get('role') in ['user', 'assistant', 'test']:
                 history.append(json_message)
             #logger.info(message)
         return history
@@ -134,3 +134,26 @@ class RedisClient:
     
     async def update_chat_list_with_title(self, user_id: str, chat_id: str, chat_title: str):
         await self.client.hset(f"user:{user_id}:chat:{chat_id}", "chat_title", chat_title)
+        
+        
+    async def update_test_answer(self, chat_id: str, test_id: str, question_index: int, user_answer: int) -> bool:
+        history_key = f"chat:{chat_id}:history"
+        messages = await self.client.lrange(history_key, 0, -1)
+        
+        for i, msg_str in enumerate(messages):
+            msg = json.loads(msg_str)
+            if msg.get('role') == 'test':
+                try:
+                    from schemas import TestSchema
+                    test_data = TestSchema.model_validate_json(msg.get('content', '{}'))
+                    
+                    if test_data.test_id == test_id:
+                        if question_index < len(test_data.questions):
+                            test_data.questions[question_index].user_answer = user_answer
+                            msg['content'] = test_data.model_dump_json()
+                            
+                            await self.client.lset(history_key, i, json.dumps(msg))
+                            return True
+                except Exception:
+                    continue
+        return False

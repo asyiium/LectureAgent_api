@@ -4,9 +4,12 @@ import asyncio
 from typing import List, Dict, Optional, AsyncGenerator
 from datetime import datetime
 import uuid
+import json
 
 from llm_service import LLMService
 from redis_client import RedisClient
+
+from schemas import TestSchema, TestQuestionSchema
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +65,41 @@ class ChatManager:
                     ):
                         full_response += chunk
                         yield chunk
-                    
-                    await self.redis.add_message(chat_id, 'assistant', full_response)
+                        
+                    try:
+                        logger.info("q1")
+                        full_response = full_response.replace("[TEST_START]", "").strip()
+                        parsed = json.loads(full_response)
+                        logger.info("q2")
+                        if "test_title" in parsed and "questions" in parsed:
+                            logger.info("q3")
+                            test_id = str(uuid.uuid4())
+
+                            test_model = TestSchema(
+                                test_id=test_id,
+                                test_title=parsed["test_title"],
+                                questions=[
+                                    TestQuestionSchema(
+                                        question_text=q["question_text"],
+                                        options=q["options"],
+                                        explanation=q["explanation"],
+                                        user_answer=None
+                                    ) for q in parsed["questions"]
+                                ]
+                            )
+                            logger.info("q4")
+                            await self.redis.add_message(chat_id, 'test', test_model.model_dump_json())
+                            logger.info("q5")
+                            yield f"[TEST_ID]{test_id}[/TEST_ID]"
+                            logger.info("q6")
+                        else:
+                            logger.info("q7")
+                            await self.redis.add_message(chat_id, 'assistant', full_response)
+                    except (json.JSONDecodeError, ValueError) as e:
+                        logger.info("q8")
+                        logger.info(full_response)
+                        logger.info(e)
+                        await self.redis.add_message(chat_id, 'assistant', full_response)
                     
                     if len(history) <= 1:
                         new_title = await self.llm.generate_chat_title(message)
@@ -79,8 +115,31 @@ class ChatManager:
             full_response = ""
             async for chunk in self.llm.get_answer(message, history, chat_id):
                 full_response += chunk
-            
-            await self.redis.add_message(chat_id, 'assistant', full_response)
+                
+                
+            try:
+                parsed = json.loads(full_response)
+                if "test_title" in parsed and "questions" in parsed:
+                    test_id = str(uuid.uuid4())
+                    test_model = TestSchema(
+                        test_id=test_id,
+                        test_title=parsed["test_title"],
+                        questions=[
+                            TestQuestionSchema(
+                                question_text=q["question_text"],
+                                options=q["options"],
+                                explanation=q["explanation"],
+                                user_answer=None
+                            ) for q in parsed["questions"]
+                        ]
+                    )
+                    await self.redis.add_message(chat_id, 'test', test_model.model_dump_json())
+                    # Для не-streaming режима возвращаем словарь с ID и данными
+                    return {"type": "test", "test_id": test_id, "data": test_model.model_dump()}
+                else:
+                    await self.redis.add_message(chat_id, 'assistant', full_response)
+            except (json.JSONDecodeError, ValueError):
+                await self.redis.add_message(chat_id, 'assistant', full_response)
             
             if len(history) <= 1:
                 new_title = await self.llm.generate_chat_title(message)

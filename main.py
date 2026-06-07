@@ -91,9 +91,14 @@ async def ask_question(chat_id: str, question: QuestionCreateSchema):
         
         async def sse_generator():
             async for chunk in stream_generator:
-                if chunk.startswith("[TITLE]") and chunk.endswith("[/TITLE]"):
+                if chunk == "[TEST_START]":
+                    yield f"data: {json.dumps({'type': 'test_start'})}\n\n"
+                elif chunk.startswith("[TITLE]") and chunk.endswith("[/TITLE]"):
                     title = chunk[7:-8]
                     yield f"data: {json.dumps({'type': 'title', 'content': title})}\n\n"
+                elif chunk.startswith("[TEST_ID]") and chunk.endswith("[/TEST_ID]"):
+                    tid = chunk[9:-10]
+                    yield f"data: {json.dumps({'type': 'test_id', 'content': tid})}\n\n"
                 else:
                     yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
             
@@ -209,4 +214,29 @@ async def delete_media(chat_id: str, media_id: str):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error deleting media: {str(e)}"
+        )
+    
+    
+@app.post("/update_test_answer/{chat_id}/{test_id}")
+async def update_test_answer(chat_id: str, test_id: str, payload: UpdateTestAnswerSchema):
+    try:
+        success = await redis.update_test_answer(
+            chat_id=chat_id,
+            test_id=test_id,
+            question_index=payload.question_index,
+            user_answer=payload.user_answer
+        )
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Test or question not found"
+            )
+        return {"status": "success", "message": "Answer updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Error updating test answer: {e}')
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating test answer: {str(e)}"
         )
