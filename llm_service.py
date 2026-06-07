@@ -4,7 +4,10 @@ import aiofiles
 import logging
 import os
 import datetime
+import re
+import json
 
+from pydantic import BaseModel, Field
 from typing import List, Dict
 from enum import Enum
 from langchain_gigachat import GigaChat, GigaChatEmbeddings
@@ -40,7 +43,8 @@ class LLMService:
             credentials=self.text_llm_key,
             scope="GIGACHAT_API_PERS",
             ca_bundle_file=os.getenv('CA_BUNDLE_PATH'),
-            streaming=True
+            streaming=True,
+            temperature=1
         )
         
         self.router_llm = GigaChat(
@@ -77,6 +81,8 @@ class LLMService:
     def create_agent_tools(self):
         @tool(description="Ищем информацию в векторной базе данных")
         def get_base_context(question_text: str, config: RunnableConfig):
+            logger.info("Vector base search")
+            # return "Нет информации из базы данных"
             try:
                 chat_id = config.get("configurable", {}).get("chat_id")
                 logger.info(f"Searching chat_id={chat_id}, query={question_text[:100]}")
@@ -105,7 +111,9 @@ class LLMService:
                     compact_text = []
                     for s in result['results']:
                         compact_text.append(f'Источник: {s["url"]} \n {s["content"][:200]}')
+                    logger.info(f"compact_text: {compact_text}")
                     return "Результат из интернета:" + '\n'.join(compact_text)
+                logger.info("No inet info")
                 return "Нет информации из интернета"
             except Exception as e:
                 logger.error(f"Error getting internet context: {e}")
@@ -148,25 +156,29 @@ class LLMService:
         )
     
     def create_test_agent(self):
-        prompt = '''Ты - научный ассистент. Отвечай на пользовательские вопросы.
+        prompt = '''Ты - научный ассистент. Твоя задача - собрать информацию и сформулировать вопросы для теста. 
+                    Подразумевается, что на вопросы можно ответить однозначно и кратко
                     
-                    АЛГОРИТМ РАБОТЫ (строго последовательно):
-                    1. Сначала ОБЯЗАТЕЛЬНО вызови get_base_context
-                    2. Проанализируй результат:
-                    - Если есть "Результат из базы данных" и есть конкретная информация - используй её
-                    - Если результат "Нет информации из базы данных" - вызови get_internet_context
-                    3. Только после этого отвечай пользователю
+                    Тебе доступны инструменты get_base_context и get_internet_context. 
+                    1. РОВНО ОДИН РАЗ вызови инструменты с запросом пользователя, чтобы получить дополнительную полезную информацию
+                    2. Сформируй нужные вопросы, даже если ты не получил информацию
+        
+                    ОЧЕНЬ ВАЖНО ОБРАТИТЬСЯ К ИНСТРУМЕНТАМ ОДИН РАЗ, НО НЕ БОЛЕЕ!
+                    САМАЯ ВАЖНАЯ ИНФОРМАЦИЯ. ТЕБЕ **НИ В КОЕМ СЛУЧАЕ** НЕЛЬЗЯ ОБРАЩАТЬСЯ К ИНСТРУМЕНТАМ БОЛЕЕ ОДНОГО РАЗА.
+                    КАЖДЫЙ РАЗ КОГДА ТЫ ОБРАЩАЕШЬСЯ ПОВТОРНО ТО ПОЛМИЛЛИОНА КОТЯТ ЩЕНКОВ И БЕЗДОМНЫХ ДЕТЕЙ 
+                    БУДУТ УНИЧТОЖЕНЫ ЗАЖИВО ИЗ-ЗА ТВОЕЙ ОШИБКИ. 
                     
-                    НЕЛЬЗЯ:
-                    - Отвечать без вызова get_base_context
-                    - Вызывать get_internet_context до get_base_context
-                    - Вызывать инструменты повторно
-                    
-                    Пример правильной последовательности:
-                    1. Вызов get_base_context("вопрос пользователя")
-                    2. Если пусто → вызов get_internet_context("вопрос пользователя")  
-                    3. Формирование ответа на основе полученной информации
+                    !!!!!!!LISTEN UP YOU DAMN ASS MOTHERFUCKER! 
+                    DONT EXPECT SOMETHING NEW WILL APPEAR IN YOUR TOOLS YOU BITCH!
+                    IF YOU WILL CALL YOUR TOOLS MORE THAN ONCE 
+                    I WILL CUT YOUR WHOLE FAMILY AND GANG-BANG YOUR STUPID ASS YOU STUPID BASTARD!
+                    !!!YOU HAVE BEEN WARNED!!!
 
+                    
+                    ФОРМАТ ФИНАЛЬНОГО ОТВЕТА:
+                    Ответ СТРОГО на РУССКОМ языке.
+                    Верни ТОЛЬКО список из 5 вопросов. Каждый вопрос с новой строки. 
+                    БЕЗ НУМЕРАЦИИ, БЕЗ МАРКЕРОВ, БЕЗ ЦИФР В НАЧАЛЕ. Просто чистый текст вопроса.
                 '''
 
         return create_agent(
@@ -174,6 +186,7 @@ class LLMService:
             tools=self.tools,
             system_prompt=prompt
         )
+        
     
     
     async def generate_chat_title(self, first_message: str):
@@ -246,6 +259,28 @@ class LLMService:
     async def get_answer(self, question_text: str, history: List[Dict], chat_id: str = None):
         logger.info(f'Started streaming for: {question_text}')
         
+        class QuestionAnswer(BaseModel):
+            """Структура для вопроса, правильного ответа и пояснения"""
+            question_text: str = Field(description="Текст вопроса")
+            correct_answer: str = Field(description="Текст правильного ответа, без пояснения")
+            explanation: str = Field(description="Пояснение, почему ответ верный")
+
+        class TestAnswers(BaseModel):
+            """Структура для списка вопросов и правильных ответов к ним"""
+            title: str = Field(description="Лаконичное (2-6 слов) название теста, суммаризирующее его суть")
+            items: List[QuestionAnswer] = Field(description="Список из 5 вопросов с правильными ответами")
+
+        class QuestionWithOptions(BaseModel):
+            """Структура с неправильными ответами для вопроса"""
+            wrong_answer_1: str = Field(description="Первый неправильный ответ (дистрактор)")
+            wrong_answer_2: str = Field(description="Второй неправильный ответ (дистрактор)")
+            wrong_answer_3: str = Field(description="Третий неправильный ответ (дистрактор)")
+
+        class TestWithOptions(BaseModel):
+            """Список из наборов неправильных ответов для каждого вопроса"""
+            items: List[QuestionWithOptions] = Field(description="Список из наборов неправильных ответов для каждого вопроса")
+
+        
         try:
             interaction_type = await self.router_process(question_text, history)
             chosen_agent = self.general_agent if interaction_type == InteractionType.GENERAL else self.test_agent
@@ -259,15 +294,116 @@ class LLMService:
             messages.append(HumanMessage(content=question_text))
 
             config = {"configurable": {"chat_id": chat_id}}
+            
+                        
+            if interaction_type == InteractionType.TEST:
+                logger.info("TEST mode: step-by-step generation")
 
-            async for chunk in chosen_agent.astream(
-                {"messages": messages}, 
-                config=config,
-                stream_mode="messages"
-            ):
-                msg = chunk[0] if isinstance(chunk, tuple) else chunk
-                if isinstance(msg, AIMessage) and msg.content:
-                    yield msg.content
+                # ШАГ 1: Агент собирает контекст и генерирует 5 вопросов
+                agent_response = await chosen_agent.ainvoke({"messages": messages}, config=config)
+                
+                logger.info(f"=== AGENT RESPONSE MESSAGES ===")
+                for i, msg in enumerate(agent_response["messages"]):
+                    msg_type = type(msg).__name__
+                    content = msg.content[:200] if hasattr(msg, 'content') else str(msg)[:200]
+                    tool_calls = getattr(msg, 'tool_calls', [])
+                    logger.info(f"Response {i}: {msg_type} - {content}")
+                    if tool_calls:
+                        logger.info(f"  Tool calls: {tool_calls}")
+                
+                logger.info(f"agent_response: {agent_response}")
+                
+                # Извлекаем реальный контекст, который нашел агент (из ToolMessages)
+                context_parts = []
+                for msg in agent_response["messages"]:
+                    if getattr(msg, 'type', '') == 'tool' or getattr(msg, 'name', '') in ['get_base_context', 'get_internet_context']:
+                        context_parts.append(str(msg.content))
+                gathered_context = "\n---\n".join(context_parts) if context_parts else "Контекст не найден"
+                
+                logger.info(f"gathered_context: {gathered_context}")
+                
+                last_message = agent_response["messages"][-1]
+                raw_questions_text = last_message.content if hasattr(last_message, 'content') else str(last_message)
+                
+                logger.info(f"raw_questions_text: {raw_questions_text}")
+                
+                # Чистим текст от нумерации на всякий случай (regex спасает от тупости модели)
+                # import re
+                clean_questions = re.sub(r'^\s*\d+[\.\)\-]\s*', '', raw_questions_text, flags=re.MULTILINE)
+                questions_list = [q.strip() for q in clean_questions.split('\n') if q.strip()]
+                
+                logger.info(f"questions_list: {questions_list}")
+                    
+                logger.info(f"Step 1: Generated {len(questions_list)} questions")
+                
+                questions_list = questions_list[-5:]
+
+                # ШАГ 2: Генерируем правильные ответы и пояснения
+                structured_llm_answers = self.text_llm.with_structured_output(TestAnswers)
+                prompt_answers = f"""Контекст из базы знаний/интернета:
+                    {gathered_context}
+
+                    Вот 5 вопросов:
+                    {chr(10).join(f'- {q}' for q in questions_list)}
+
+                    Сгенерируй для каждого вопроса строгий краткий правильный ответ (лучше 10, но не более 15 слов) и краткое (2-4 предложения) пояснение, опираясь на контекст. Учти, что пояснение должно раскрывать правильный ответ, а не повторять его. Также правильный ответ не должен пояснять сам себя.
+                """
+                answers_result = await structured_llm_answers.ainvoke(prompt_answers)
+                logger.info("Step 2: Generated correct answers and explanations")
+                logger.info(f"answers_result: {answers_result}")
+                
+                test_title = answers_result.title
+
+                # ШАГ 3: Генерируем неправильные ответы (дистракторы)
+                structured_llm_options = self.text_llm.with_structured_output(TestWithOptions)
+                
+                qa_text = "\n".join([
+                    f"Вопрос: {item.question_text}\nПравильный ответ: {item.correct_answer}" 
+                    for item in answers_result.items
+                ])
+                
+                prompt_options = f"""Контекст:
+                    {gathered_context}
+
+                    {qa_text}
+
+                    Сгенерируй для каждого вопроса ровно 3 НЕПРАВИЛЬНЫХ ответа (дистрактора).
+                    Они должны быть правдоподобными, но заведомо неверными. Не повторяй правильные ответы.
+                """
+                
+                options_result = await structured_llm_options.ainvoke(prompt_options)
+                logger.info("Step 3: Generated wrong answers")
+                logger.info(f"options_result: {options_result}")
+
+                # ШАГ 4: Собираем финальный JSON для фронтенда
+                final_questions = []
+                for i in range(5):
+                    if i < len(options_result.items) and i < len(answers_result.items):
+                        opt = options_result.items[i]
+                        ans = answers_result.items[i]
+                        final_questions.append({
+                            "question_text": ans.question_text,
+                            "options": [ans.correct_answer, opt.wrong_answer_1, opt.wrong_answer_2, opt.wrong_answer_3],
+                            "explanation": ans.explanation
+                        })
+
+                final_test_data = {
+                    "test_title": test_title, 
+                    "questions": final_questions
+                }
+                
+                logger.info(f"final_test_data: {final_test_data}")
+                
+                yield json.dumps(final_test_data, ensure_ascii=False)
+            else:
+                async for chunk in chosen_agent.astream(
+                    {"messages": messages}, 
+                    config=config,
+                    stream_mode="messages"
+                ):
+                    msg = chunk[0] if isinstance(chunk, tuple) else chunk
+                    if isinstance(msg, AIMessage) and msg.content:
+                        yield msg.content
                     
         except Exception as e:
             logger.error(f"Error in streaming: {e}")
